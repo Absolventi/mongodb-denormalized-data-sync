@@ -204,7 +204,7 @@ const _checkConflict = function (dependency) {
 const _buildPipeline = function () {
 	let fullDocument = false;
 	const $or = [];
-	const $match = {operationType: "update", $or};
+	const $match = {operationType: {$in: ["update", "insert"]}, $or};
 	const pipeline = [
 		{$match}
 	];
@@ -215,7 +215,7 @@ const _buildPipeline = function () {
 		});
 	});
 	
-	const project = {documentKey: 1, updateDescription: 1, ns: 1};
+	const project = {documentKey: 1, updateDescription: 1, operationType: 1, ns: 1};
 	
 	Object.keys(referenceKeyProject).forEach(key => {
 		if (key !== "_id") {
@@ -229,6 +229,40 @@ const _buildPipeline = function () {
 	return {pipeline, fullDocument};
 };
 
+const _extendUpdatedFieldsForInsert = async function (next) {
+	const { ns, fullDocument, documentKey } = next;
+
+	if (!dependenciesMap[ns.db] ||
+		!dependenciesMap[ns.db][ns.coll]
+	) {
+		return next;
+	}
+
+	const localKeys = dependenciesMap[ns.db][ns.coll]
+		.filter(({ type }) => type === "local")
+		.map(({ local_key}) => local_key);
+
+	if (!localKeys.length) {
+		return next;
+	}
+
+	const projection = localKeys.reduce((a, k) => ({ ...a, [k]: 1 }), {});
+	const doc = fullDocument || await dbClient.db(ns.db).collection(ns.coll).findOne({ _id: documentKey._id }, {projection});
+
+	const updatedFields = dependenciesMap[ns.db][ns.coll]
+		.filter(({ type }) => type === "local")
+		.map(({ local_key}) => local_key)
+		.reduce((a, k) => ({
+			...a,
+			[k]: doc[k],
+		}), {});
+
+	return {
+		...next,
+		updateDescription: { updatedFields },
+	};
+}
+
 const _changeStreamLoop = async function (next) {
 	
 	
@@ -236,13 +270,17 @@ const _changeStreamLoop = async function (next) {
 		return;
 	}
 	try {
-		const needToUpdateObj = await _getNeedToUpdateDependencies(next);
-		
+		const { operationType } = next;
+
+		const updateDoc = operationType === "insert" ? await _extendUpdatedFieldsForInsert(next) : next;
+
+		const needToUpdateObj = await _getNeedToUpdateDependencies(updateDoc);
+
 		if (Object.keys(needToUpdateObj).length === 0) {
 			return;
 		}
-		await synchronizerModel.addResumeToken({token: next._id}, "sync");
-		
+		await synchronizerModel.addResumeToken({ token: updateDoc._id }, "sync");
+
 		await _updateCollections(needToUpdateObj);
 		
 	} catch (e) {
