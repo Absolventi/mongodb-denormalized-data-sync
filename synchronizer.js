@@ -290,23 +290,50 @@ const _changeStreamLoop = async function (next) {
 	
 };
 
+const _isInChangedFields = (changedFields, key) => {
+	return typeof (Object.keys(changedFields).find((changedFieldKey) => changedFieldKey === key || changedFieldKey.startsWith(key + '.'))) !== 'undefined';
+}
+
+const _extractFieldsByPrefix = (changedFields, requestKey) =>{
+	const result = {};
+	const prefix = requestKey + ".";
+
+	for (const key in changedFields) {
+		if (key.startsWith(prefix)) {
+			const newKey = key.slice(prefix.length);
+			result[newKey] = changedFields[key];
+		}
+	}
+
+	return result;
+}
+
+const _extractChangedValue = (key, changedFields, fullDocument) => {
+	if (typeof changedFields[key] !== 'undefined') return changedFields[key];
+	if (fullDocument && typeof fullDocument[key] !== 'undefined') return fullDocument[key];
+
+	return _extractFieldsByPrefix(changedFields, key);
+}
+
 const _getNeedToUpdateDependencies = async function ({ns, documentKey, updateDescription, fullDocument}) {
 	const needToUpdateObj = {};
 	if (!dependenciesMap[ns.db] ||
 		!dependenciesMap[ns.db][ns.coll]
 	) {
+		debug('Unknown db or collection to sync', ns.db, ns.coll);
 		return;
 	}
 	
 	const changedFields = updateDescription.updatedFields;
 	
 	const addRefDep = (dependency) => {
-		if (dependency.type !== "ref" || dependency.dependent_fields.some(field => changedFields[field]) === false) {
+		if (dependency.type !== "ref" || dependency.dependent_fields.some((field) => _isInChangedFields(changedFields, field)) === false) {
 			return;
 		}
 		const refKey = dependency.reference_key === "_id" ? documentKey._id : fullDocument[dependency.reference_key];
 		Object.keys(dependency.fields_format).forEach(dependentField => {
-			if (changedFields[dependency.fields_format[dependentField]] === undefined) {
+			const depKey = dependency.fields_format[dependentField];
+			if (!_isInChangedFields(changedFields, depKey)) {
 				return;
 			}
 			needToUpdateObj[ns.db] = needToUpdateObj[ns.db] || {};
@@ -318,8 +345,7 @@ const _getNeedToUpdateDependencies = async function ({ns, documentKey, updateDes
 			if (!needToUpdateObj[ns.db][dependency.dependent_collection].dependentKeys[dependency.dependent_key]) {
 				needToUpdateObj[ns.db][dependency.dependent_collection].dependentKeys[dependency.dependent_key] = {};
 			}
-			
-			needToUpdateObj[ns.db][dependency.dependent_collection].dependentKeys[dependency.dependent_key][dependentField] = changedFields[dependency.fields_format[dependentField]];
+			needToUpdateObj[ns.db][dependency.dependent_collection].dependentKeys[dependency.dependent_key][dependentField] = _extractChangedValue(depKey, changedFields, fullDocument);
 		});
 	};
 	const addLocalDep = async (dbName, dependency) => {
