@@ -572,12 +572,14 @@ const _updateSyncItemBatchResults = async function ({syncItem, documents, depend
 				}
 				payload[dependentField] = value;
 			}
-			bulk.push({
-				updateMany: {
-					"filter": {[syncItem.dependent_key]: doc[syncItem.reference_key]},
-					"update": {$set: payload}
-				}
-			});
+			if (Object.keys(payload).length > 0) {
+				bulk.push({
+					updateMany: {
+						"filter": { [syncItem.dependent_key]: doc[syncItem.reference_key] },
+						"update": { $set: payload }
+					}
+				});
+			}
 		});
 		debug("_updateSyncItemBatchResults", JSON.stringify(bulk));
 		return dependentCollection.bulkWrite(bulk);
